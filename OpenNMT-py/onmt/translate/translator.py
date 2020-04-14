@@ -700,9 +700,11 @@ class Translator(object):
                 pred_emb = self.model.generator(dec_out.squeeze(0))
                 log_probs = self._emb_to_scores(pred_emb, self.model.decoder.tgt_out_emb)
                 import pickle
-                #
                 with open('fren_scores.pkl', 'wb+') as scores_fh:
-                    pickle.dump({'scores': log_probs,
+                    top_k_scores, top_k_idx = log_probs.topk(200)
+                    pickle.dump({'k' : 200,
+                                 'top_k_idx' : top_k_idx,
+                                 'top_k_scores' : top_k_scores,
                                  'tgt_vocab': self._tgt_vocab,
                                  'target': batch.tgt}
                                  ,scores_fh)
