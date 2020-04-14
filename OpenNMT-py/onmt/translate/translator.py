@@ -699,6 +699,13 @@ class Translator(object):
                     print(dec_out)
                 pred_emb = self.model.generator(dec_out.squeeze(0))
                 log_probs = self._emb_to_scores(pred_emb, self.model.decoder.tgt_out_emb)
+                import pickle
+                #
+                with open('fren_scores.pkl', 'wb+') as scores_fh:
+                    pickle.dump({'scores': log_probs,
+                                 'tgt_vocab': self._tgt_vocab,
+                                 'target': batch.tgt}
+                                 ,scores_fh)
             else:
                 log_probs = self.model.generator(dec_out.squeeze(0))
             
@@ -742,7 +749,6 @@ class Translator(object):
         return (log_probs, pos_log_probs), attn
     
     def _emb_to_scores(self, pred_emb, tgt_out_emb):
-
         if self.decode_loss == "l2": 
             rA = (pred_emb * pred_emb).sum(dim=1)
             rA = rA.unsqueeze(dim=1)
