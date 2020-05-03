@@ -153,7 +153,7 @@ class TranslationBuilder(object):
             translation = Translation(
                 src[:, b] if src is not None else None,
                 src_raw, pred_sents, attn[b], pred_score[b],
-                gold_sent, gold_score[b], align[b], gold_sec_sent, sec_pred_sents,
+                gold_sent, gold_score[b], align[b], gold_sec_sent, sec_pred_sents
             )
             translations.append(translation)
 
@@ -180,7 +180,7 @@ class Translation(object):
                  "gold_sent", "gold_score", "word_aligns", "gold_sec_sent", "sec_pred_sents"]
 
     def __init__(self, src, src_raw, pred_sents,
-                 attn, pred_scores, tgt_sent, gold_score, word_aligns, gold_sec_sent, sec_pred_sents):
+                 attn, pred_scores, tgt_sent, gold_score, word_aligns, gold_sec_sent, sec_pred_sents, last_logit = None):
         self.src = src
         self.src_raw = src_raw
         self.pred_sents = pred_sents
@@ -191,6 +191,7 @@ class Translation(object):
         self.word_aligns = word_aligns
         self.sec_pred_sents = sec_pred_sents
         self.gold_sec_sent = gold_sec_sent
+        self.last_logit = last_logit
 
     def log(self, sent_number):
         """
