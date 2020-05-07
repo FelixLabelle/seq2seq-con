@@ -20,6 +20,9 @@ from onmt.utils.alignment import extract_alignment, build_align_pharaoh
 from onmt.modules.copy_generator import collapse_copy_scores
 from onmt.modules.ive import logcmk
 
+batch_overlaps = [[],[],[]]
+prob_mass = [[],[],[],[]]
+
 def build_translator(opt, report_score=True, logger=None, out_file=None):
     if out_file is None:
         out_file = codecs.open(opt.output, 'w+', 'utf-8')
@@ -416,7 +419,6 @@ class Translator(object):
                 batch, data.src_vocabs, attn_debug
             )
             translations = xlation_builder.from_batch(batch_data)
-
             for trans in translations:
                 all_scores += [trans.pred_scores[:self.n_best]]
                 pred_score_total += trans.pred_scores[0]
@@ -492,7 +494,12 @@ class Translator(object):
                         os.write(1, output.encode('utf-8'))
 
         end_time = time.time()
-
+        print("The mean batch overlap was {} with a std of {}".format(
+               torch.mean(torch.tensor(batch_overlaps).float(), dim=-1),
+               torch.std(torch.tensor(batch_overlaps).float(),dim=-1)))
+        print("The probability distribution mean was {} with a std of {}".format(
+               torch.mean(torch.tensor(prob_mass).float(), dim=-1),
+               torch.std(torch.tensor(prob_mass).float(),dim=-1)))
         if self.report_score:
             msg = self._report_score('PRED', pred_score_total,
                                      pred_words_total)
@@ -686,7 +693,10 @@ class Translator(object):
         dec_out, dec_attn = self.model.decoder(
             decoder_in, memory_bank, memory_lengths=memory_lengths, step=step
         )
-
+       
+        #mask = torch.arange(dec_out.size(2)).reshape(1, 1, -1) == top_k_idx.unsqueeze(2)
+        #decoder_mask = torch.zeros_like(dec_out)
+        #decoder_mask[mask] = decout[mask]        
         # Generator forward.
         if not self.copy_attn:
             if "std" in dec_attn:
@@ -701,7 +711,60 @@ class Translator(object):
                 log_probs = self._emb_to_scores(pred_emb, self.model.decoder.tgt_out_emb)
             else:
                 log_probs = self.model.generator(dec_out.squeeze(0))
-            
+                if len(log_probs.shape) == 2:
+                    probs_copy = log_probs.unsqueeze(0).detach().clone()
+                else:
+                    probs_copy = log_probs.detach().clone()
+                # TODO: Check that idxs is the same as the argmax..
+                top_probs_idx = probs_copy.topk(10 , dim=-1,sorted=True, largest=True)[1]
+                idxs = top_probs_idx[...,0]
+                if not torch.all(idxs == probs_copy.argmax(dim=-1)):
+                    print("Invalid top k retrieved")
+                retrieved_embeds = self.model.decoder.embeddings.word_lut(idxs)
+                embeds = self.model.decoder.embeddings.word_lut.weight
+                dist = torch.zeros(probs_copy.shape)
+                USE_COSINE_DIST = False
+                if USE_COSINE_DIST:
+                    # TODO: Reimplement vectorially
+                    #normed_embeds = embeds/embeds.norm(dim=0)[:, None].transpose(0,1)    
+                    #normed_hid_state = retrieved_embeds/retrieved_embeds.norm(dim=-1)[:, None].permute(0,2,1)
+                    #dist = torch.matmul(normed_hid_state, normed_embeds.transpose(0,1))
+                    for pos in range(retrieved_embeds.size(0)):
+                        a_norm = embeds / embeds.norm(dim=1)[:, None]
+                        b_norm = retrieved_embeds[pos] / retrieved_embeds[pos].norm(dim=1)[:, None]
+                        res = torch.mm(a_norm, b_norm.transpose(0,1)).transpose(0,1) # Last op seems redundant, flipping order might fix this..
+                        dist[pos,:] = res 
+                    dist = dist.to(idxs.device)
+                else:
+                    for seq_pos in range(retrieved_embeds.size(0)):
+                        for batch_pos in range(retrieved_embeds.size(1)):
+                            dist[seq_pos, batch_pos, :] = torch.norm(retrieved_embeds[seq_pos,batch_pos,:] - embeds, dim=-1)
+                    dist = dist.to(idxs.device)
+                # TODO: Check that the largest top_k_idx is the same as the top_k_idx
+                _, top_k_idx = dist.topk(10, largest=USE_COSINE_DIST, sorted=True)
+                #import pdb;pdb.set_trace()
+                if torch.any(top_k_idx[...,0] != idxs):
+                   print("Top idx not showing up")
+                for pos in range(top_k_idx.size(0)):
+                    for batch in range(top_k_idx.size(1)):
+                        prob_mass[0].append(probs_copy[pos,batch,top_k_idx[pos,batch,0]].exp().item())
+                        for k_idx, k_val in enumerate([3,5,10]):
+                            dist_idxs = set(top_k_idx[pos,batch,:k_val].tolist())
+                            prob_idxs = set(top_probs_idx[pos,batch,:k_val].tolist())
+                            batch_overlaps[k_idx].append(len(dist_idxs.intersection(prob_idxs)))
+                            prob_mass[1 + k_idx].append(probs_copy[pos,batch,top_k_idx[pos,batch,:k_val]].exp().sum().item())
+                #top_k_idx = torch.cat((top_k_idx, idxs.unsqueeze(2)), dim=-1)
+                #decoder_mask = torch.zeros(dec_out.shape)
+                mask = torch.ones(dist.shape) * torch.log(torch.tensor(1e-12))
+                for seq_pos in range(mask.size(0)):
+                    for batch_item in range(mask.size(1)):
+                        for idx in top_k_idx[seq_pos, batch_item]:
+                            mask[seq_pos][batch_item][idx] = probs_copy[seq_pos][batch_item][idx]
+                log_probs = mask.to(log_probs.device).squeeze(0) #log_probs * mask.squeeze(0).to(log_probs.device)
+                #import pdb;pdb.set_trace()
+                #global all_log_probs
+                #all_log_probs = torch.cat((all_log_probs , log_probs.detach().cpu()), dim = -1)
+
             pos_log_probs = None
             if self.multi_task:
                 pos_log_probs = self.model.mtl_generator(dec_out.squeeze(0))
@@ -720,6 +783,7 @@ class Translator(object):
             scores = self.model.generator(dec_out.view(-1, dec_out.size(2)),
                                           attn.view(-1, attn.size(2)),
                                           src_map)
+            
             # here we have scores [tgt_lenxbatch, vocab] or [beamxbatch, vocab]
             if batch_offset is None:
                 scores = scores.view(-1, batch.batch_size, scores.size(-1))
@@ -817,6 +881,7 @@ class Translator(object):
         for step in range(decode_strategy.max_length):
             decoder_input = decode_strategy.current_predictions
             decoder_input = decoder_input.view(1, -1, decoder_input.size(2))
+            # TODO: Add masking step here
             (log_probs, sec_log_probs), attn = self._decode_and_generate(
                 decoder_input,
                 memory_bank,
